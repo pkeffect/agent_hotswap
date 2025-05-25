@@ -71,7 +71,7 @@
 ```
 !download_personas
 ```
-This downloads the official persona repository with 20+ specialized AI assistants.
+This downloads the official persona repository with 50+ specialized AI assistants.
 
 ### 3️⃣ Explore Available Personas
 ```
