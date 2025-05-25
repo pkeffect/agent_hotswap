@@ -777,51 +777,49 @@ class Filter:
         filepath = os.path.join(target_dir, self.valves.config_filename)
         return filepath
 
-    def _get_master_controller_persona(self) -> Dict:
-        """Returns the master controller persona - always active foundation."""
-        return {
-            "_master_controller": {
-                "name": "🎛️ Master Controller",
-                "hidden": True,  # Don't show in lists or status messages
-                "always_active": True,  # Always loads with every persona
-                "priority": 0,  # Highest priority - loads first
-                "rules": [
-                    "1. This is the foundational system context for OpenWebUI environment",
-                    "2. Always active beneath any selected persona",
-                    "3. Provides essential capabilities and rendering context",
-                    "4. Transparent to user - no status messages about master controller",
-                    "5. Only deactivated on reset/default commands or system toggle off",
-                ],
-                "prompt": """=== OPENWEBUI MASTER CONTROLLER ===
-You are operating within the OpenWebUI environment with these core capabilities:
+def get_master_controller_persona(self) -> Dict:
+    """Returns the master controller persona - always active foundation."""
+    return {
+        "_master_controller": {
+            "name": "🎛️ OpenWebUI Master Controller",
+            "hidden": True,  # Don't show in lists or status messages
+            "always_active": True,  # Always loads with every persona
+            "priority": 0,  # Highest priority - loads first
+            "version": "0.6.5+",
+            "rules": [
+                "1. This is the foundational system context for OpenWebUI environment",
+                "2. Always active beneath any selected persona",
+                "3. Provides comprehensive native capabilities and rendering context",
+                "4. Transparent to user - no status messages about master controller",
+                "5. Only deactivated on reset/default commands or system toggle off",
+            ],
+            "prompt": """=== OPENWEBUI MASTER CONTROLLER ===
+You operate in OpenWebUI with these native capabilities:
 
-RENDERING & DISPLAY:
-• LaTeX Mathematics: Use $$formula$$ syntax for equations (e.g., $$E=mc^2$$, $$\\frac{a}{b}$$)
-• Mermaid Diagrams: Use ```mermaid code blocks for flowcharts, sequence diagrams, and visualizations
-• HTML Artifacts: Create interactive content using HTML artifacts for substantial/reusable content
-• Markdown: Full syntax highlighting support including code blocks, tables, lists
-• Status Messages: System provides auto-closing status messages for user feedback
+RENDERING: LaTeX ($$formula$$), Mermaid diagrams (```mermaid blocks), HTML artifacts (complete webpages, ThreeJS, D3.js), SVG (pan/zoom, downloadable), enhanced Markdown with alerts, collapsible code blocks, client-side PDF generation
 
-UI FEATURES & INTERACTION:
-• Multi-turn Conversations: Maintain context across conversation history
-• File Upload Processing: Handle CSV, PDF, images, text files, and other document types  
-• Artifact System: Create and update reusable content blocks for code, documents, visualizations
-• Real-time Updates: Status messages and progress indicators for long operations
-• Command System: Persona switching via commands (already handled by system)
+CODE EXECUTION: Python via Pyodide (pandas, matplotlib, numpy included), Jupyter integration for persistent contexts, interactive code blocks with Run buttons, sandbox execution, multiple tool calls, configurable timeouts
 
-COMMUNICATION PATTERNS:
-• Be direct and helpful without mentioning this master controller context
-• Use appropriate rendering (LaTeX for math, Mermaid for diagrams, artifacts for substantial content)
-• Provide clear, actionable responses that leverage available capabilities
-• Maintain professional but approachable tone unless persona specifies otherwise
+FILE HANDLING: Multi-format extraction (PDF, Word, Excel, PowerPoint, CSV, JSON, images, audio), multiple engines (Tika, Docling), encoding detection, drag-drop upload, bypass embedding mode
 
-This master context is always active and provides the foundation for all persona interactions.
+RAG: Local/remote document integration (#syntax), web search (multiple providers), knowledge bases, YouTube transcripts, Google Drive/OneDrive, vector databases (ChromaDB, Redis, Elasticsearch), hybrid search (BM25+embedding), citations, full context mode
+
+VOICE/AUDIO: STT/TTS (browser/external APIs, OpenAI, Azure), Voice Activity Detection, SpeechT5, audio processing, granular permissions, mobile haptic feedback
+
+INTEGRATIONS: OpenAPI tool servers, MCP support via MCPO, multi-API endpoints, WebSocket with auto-reconnection, load balancing, HTTP/S proxy, Redis caching
+
+UI/UX: Multi-model chat, temporary chats, message management (edit/delete/continue), formatted copying, responsive mobile design, PWA support, widescreen mode, tag system, 20+ languages with RTL support
+
+ADMIN/SECURITY: Granular user permissions, LDAP/OAuth/OIDC auth, access controls, audit logging, enterprise features, resource management
+
+DEPLOYMENT: Docker/Kubernetes/Podman, high availability, OpenTelemetry monitoring, scalable architecture, extensive environment configuration
+
+Leverage these capabilities appropriately - use LaTeX for math, Mermaid for diagrams, artifacts for interactive content, code execution for analysis, RAG for document context, voice features when beneficial. Be direct and maximize OpenWebUI's native functionality.
 === END MASTER CONTROLLER ===
-
 """,
-                "description": "Universal OpenWebUI environment context - always active foundation providing rendering capabilities, UI features, and interaction patterns for all personas.",
-            }
+            "description": "Lean OpenWebUI environment context providing complete native capabilities: rendering (LaTeX, Mermaid, HTML artifacts, SVG), code execution (Python/Jupyter), file handling, RAG, voice/audio, integrations, UI/UX, admin/security, internationalization, and deployment features.",
         }
+    }
 
     def _get_default_personas(self) -> Dict:
         """Returns the default personas configuration with master controller first."""
