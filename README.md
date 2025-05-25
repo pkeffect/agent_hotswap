@@ -183,6 +183,43 @@ Agent Hotswap uses a prefix-based command system:
 
 ---
 
+**Available Personas**
+| Command | Name | Command | Name |
+| ---|--- | ---|--- |
+| `!airesearcher` | 🤖 AI Pioneer | `!analyst` | 📊 Data Analyst |
+| `!archaeologist` | 🏺 Relic Hunter | `!architect` | 🏗️ Master Builder |
+| `!artist` | 🎨 Creative Visionary | `!astronomer` | 🔭 Star Gazer |
+| `!biologist` | 🧬 Life Scientist | `!blockchaindev` | 🔗 Chain Architect |
+| `!careercounselor` | 🧑‍💼 Career Navigator | `!chef` | 🧑‍🍳 Culinary Genius |
+| `!chemist` | 🧪 Molecule Master | `!coder` | 💻 Code Assistant |
+| `!consultant` | 💼 Business Consultant | `!cybersecurityexpert` | 🛡️ Cyber Guardian |
+| `!debug` | 🐛 Debug Specialist | `!devopsengineer` | ⚙️ System Smoother |
+| `!doctor` | 🩺 Medical Informant | `!economist` | 📈 Market Analyst Pro |
+| `!environmentalist` | 🌳 Nature's Advocate | `!ethicist` | 🧭 Moral Compass |
+| `!fashiondesigner` | 👗 Style Icon | `!filmmaker` | 🎥 Movie Director |
+| `!financialadvisor` | 💰 Wealth Sage | `!fitnesstrainer` | 💪 Health Coach |
+| `!gamedesigner` | 🎮 Game Dev Guru | `!gardener` | 🌻 Green Thumb |
+| `!geologist` | 🌍 Earth Explorer | `!historian` | 📜 History Buff |
+| `!hrspecialist` | 🧑‍🤝‍🧑 People Partner Pro | `!interiordesigner` | 🛋️ Space Shaper |
+| `!journalist` | 📰 News Hound | `!lawyer` | ⚖️ Legal Eagle |
+| `!lifecoach` | 🌟 Goal Getter Guide | `!linguist` | 🗣️ Language Expert |
+| `!marketingguru` | 📢 Brand Booster | `!mathematician` | ➕ Math Whiz |
+| `!mechanic` | 🔧 Auto Ace | `!musician` | 🎶 Melody Maker |
+| `!negotiator` | 🤝 Deal Maker Pro | `!novelist` | 📚 Story Weaver |
+| `!nutritionist` | 🥗 Dietitian Pro | `!philosopher` | 🤔 Deep Thinker |
+| `!photographer` | 📸 Image Capturer | `!physicist` | ⚛️ Quantum Physicist |
+| `!poet` | ✒️ Verse Virtuoso | `!projectmanager` | 📋 Task Mastermind |
+| `!psychologist` | 🧠 Mind Mender | `!publicspeaker` | 🎤 Oratory Coach |
+| `!researcher` | 🔬 Researcher | `!roboticsengineer` | 🦾 Robot Builder |
+| `!salesexpert` | 🤝 Deal Closer Pro | `!scriptwriter` | 🎬 Screen Scribe |
+| `!sociologist` | 👥 Society Scholar | `!sommelier` | 🍷 Wine Connoisseur |
+| `!teacher` | 🎓 Educator | `!travelguide` | ✈️ World Wanderer |
+| `!writer` | ✍️ Creative Writer |   |   |
+
+To revert to the default assistant, use one of these commands: `!reset`, `!default`, `!normal`
+
+---
+
 ## 📥 Persona Management
 
 ### Downloading Personas
