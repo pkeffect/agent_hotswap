@@ -777,23 +777,23 @@ class Filter:
         filepath = os.path.join(target_dir, self.valves.config_filename)
         return filepath
 
-def get_master_controller_persona(self) -> Dict:
-    """Returns the master controller persona - always active foundation."""
-    return {
-        "_master_controller": {
-            "name": "🎛️ OpenWebUI Master Controller",
-            "hidden": True,  # Don't show in lists or status messages
-            "always_active": True,  # Always loads with every persona
-            "priority": 0,  # Highest priority - loads first
-            "version": "0.6.5+",
-            "rules": [
-                "1. This is the foundational system context for OpenWebUI environment",
-                "2. Always active beneath any selected persona",
-                "3. Provides comprehensive native capabilities and rendering context",
-                "4. Transparent to user - no status messages about master controller",
-                "5. Only deactivated on reset/default commands or system toggle off",
-            ],
-            "prompt": """=== OPENWEBUI MASTER CONTROLLER ===
+    def get_master_controller_persona(self) -> Dict:
+        """Returns the master controller persona - always active foundation."""
+        return {
+            "_master_controller": {
+                "name": "🎛️ OpenWebUI Master Controller",
+                "hidden": True,  # Don't show in lists or status messages
+                "always_active": True,  # Always loads with every persona
+                "priority": 0,  # Highest priority - loads first
+                "version": "0.6.5+",
+                "rules": [
+                    "1. This is the foundational system context for OpenWebUI environment",
+                    "2. Always active beneath any selected persona",
+                    "3. Provides comprehensive native capabilities and rendering context",
+                    "4. Transparent to user - no status messages about master controller",
+                    "5. Only deactivated on reset/default commands or system toggle off",
+                ],
+                "prompt": """=== OPENWEBUI MASTER CONTROLLER ===
 You operate in OpenWebUI with these native capabilities:
 
 RENDERING: LaTeX ($$formula$$), Mermaid diagrams (```mermaid blocks), HTML artifacts (complete webpages, ThreeJS, D3.js), SVG (pan/zoom, downloadable), enhanced Markdown with alerts, collapsible code blocks, client-side PDF generation
@@ -817,14 +817,14 @@ DEPLOYMENT: Docker/Kubernetes/Podman, high availability, OpenTelemetry monitorin
 Leverage these capabilities appropriately - use LaTeX for math, Mermaid for diagrams, artifacts for interactive content, code execution for analysis, RAG for document context, voice features when beneficial. Be direct and maximize OpenWebUI's native functionality.
 === END MASTER CONTROLLER ===
 """,
-            "description": "Lean OpenWebUI environment context providing complete native capabilities: rendering (LaTeX, Mermaid, HTML artifacts, SVG), code execution (Python/Jupyter), file handling, RAG, voice/audio, integrations, UI/UX, admin/security, internationalization, and deployment features.",
+                "description": "Lean OpenWebUI environment context providing complete native capabilities: rendering (LaTeX, Mermaid, HTML artifacts, SVG), code execution (Python/Jupyter), file handling, RAG, voice/audio, integrations, UI/UX, admin/security, internationalization, and deployment features.",
+            }
         }
-    }
 
     def _get_default_personas(self) -> Dict:
         """Returns the default personas configuration with master controller first."""
         # Start with master controller
-        personas = self._get_master_controller_persona()
+        personas = self.get_master_controller_persona()
 
         # Add all other personas
         personas.update(
