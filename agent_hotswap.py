@@ -16,6 +16,396 @@ import asyncio
 import time
 import os
 import traceback
+import urllib.request
+import urllib.parse
+import urllib.error
+from datetime import datetime
+import difflib
+
+
+class PersonaDownloadManager:
+    """Manages downloading and applying persona configurations from remote repositories."""
+
+    def __init__(self, valves, get_config_filepath_func):
+        self.valves = valves
+        self.get_config_filepath = get_config_filepath_func
+
+    def is_trusted_domain(self, url: str) -> bool:
+        """Check if URL domain is in the trusted whitelist."""
+        try:
+            print(f"[DOMAIN DEBUG] Checking URL: {url}")
+            parsed = urllib.parse.urlparse(url)
+            print(
+                f"[DOMAIN DEBUG] Parsed URL - scheme: {parsed.scheme}, netloc: {parsed.netloc}"
+            )
+
+            if not parsed.scheme or parsed.scheme.lower() not in ["https"]:
+                print(f"[DOMAIN DEBUG] Scheme check failed - scheme: '{parsed.scheme}'")
+                return False
+
+            print(f"[DOMAIN DEBUG] Scheme check passed")
+
+            trusted_domains_raw = self.valves.trusted_domains
+            trusted_domains = [
+                d.strip().lower() for d in trusted_domains_raw.split(",")
+            ]
+            print(f"[DOMAIN DEBUG] Trusted domains raw: '{trusted_domains_raw}'")
+            print(f"[DOMAIN DEBUG] Trusted domains processed: {trusted_domains}")
+            print(f"[DOMAIN DEBUG] URL netloc (lowercase): '{parsed.netloc.lower()}'")
+
+            is_trusted = parsed.netloc.lower() in trusted_domains
+            print(f"[DOMAIN DEBUG] Domain trusted check result: {is_trusted}")
+
+            return is_trusted
+
+        except Exception as e:
+            print(f"[DOMAIN DEBUG] Exception in domain check: {e}")
+            traceback.print_exc()
+            return False
+
+    async def download_personas(self, url: str = None) -> Dict:
+        """Download personas from remote repository with validation."""
+        download_url = url or self.valves.default_personas_repo
+
+        print(f"[DOWNLOAD DEBUG] Starting download from: {download_url}")
+
+        # Validate URL
+        print(f"[DOWNLOAD DEBUG] Checking if domain is trusted...")
+        if not self.is_trusted_domain(download_url):
+            error_msg = (
+                f"Untrusted domain. Allowed domains: {self.valves.trusted_domains}"
+            )
+            print(f"[DOWNLOAD DEBUG] Domain check failed: {error_msg}")
+            return {"success": False, "error": error_msg, "url": download_url}
+
+        print(f"[DOWNLOAD DEBUG] Domain check passed")
+
+        try:
+            # Download with timeout
+            print(f"[DOWNLOAD DEBUG] Creating HTTP request...")
+            req = urllib.request.Request(
+                download_url, headers={"User-Agent": "OpenWebUI-AgentHotswap/3.1"}
+            )
+            print(f"[DOWNLOAD DEBUG] Request created, opening connection...")
+
+            with urllib.request.urlopen(
+                req, timeout=self.valves.download_timeout
+            ) as response:
+                print(f"[DOWNLOAD DEBUG] Connection opened, status: {response.status}")
+                print(f"[DOWNLOAD DEBUG] Response headers: {dict(response.headers)}")
+
+                if response.status != 200:
+                    error_msg = f"HTTP {response.status}: {response.reason}"
+                    print(f"[DOWNLOAD DEBUG] HTTP error: {error_msg}")
+                    return {"success": False, "error": error_msg, "url": download_url}
+
+                print(f"[DOWNLOAD DEBUG] Reading response content...")
+                content = response.read().decode("utf-8")
+                content_size = len(content)
+                print(
+                    f"[DOWNLOAD DEBUG] Content read successfully: {content_size} bytes"
+                )
+                print(
+                    f"[DOWNLOAD DEBUG] Content preview (first 200 chars): {content[:200]}"
+                )
+
+                # Basic size check (prevent huge files)
+                if content_size > 1024 * 1024:  # 1MB limit
+                    error_msg = f"File too large: {content_size} bytes (max 1MB)"
+                    print(f"[DOWNLOAD DEBUG] Size check failed: {error_msg}")
+                    return {"success": False, "error": error_msg, "url": download_url}
+
+                print(f"[DOWNLOAD DEBUG] Size check passed")
+
+                # Parse JSON
+                print(f"[DOWNLOAD DEBUG] Parsing JSON...")
+                try:
+                    remote_personas = json.loads(content)
+                    print(
+                        f"[DOWNLOAD DEBUG] JSON parsed successfully, {len(remote_personas)} items found"
+                    )
+                    print(
+                        f"[DOWNLOAD DEBUG] Top-level keys: {list(remote_personas.keys())[:5]}"
+                    )
+                except json.JSONDecodeError as e:
+                    error_msg = f"Invalid JSON: {str(e)}"
+                    print(f"[DOWNLOAD DEBUG] JSON parsing failed: {error_msg}")
+                    print(
+                        f"[DOWNLOAD DEBUG] Content that failed parsing: {content[:500]}"
+                    )
+                    return {"success": False, "error": error_msg, "url": download_url}
+
+                # Validate structure
+                print(f"[DOWNLOAD DEBUG] Validating persona structure...")
+                validation_errors = PersonaValidator.validate_personas_config(
+                    remote_personas
+                )
+                if validation_errors:
+                    error_msg = f"Validation failed: {'; '.join(validation_errors[:3])}"
+                    print(f"[DOWNLOAD DEBUG] Validation failed: {validation_errors}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "url": download_url,
+                        "validation_errors": validation_errors,
+                    }
+
+                print(
+                    f"[DOWNLOAD DEBUG] Validation passed - {len(remote_personas)} personas"
+                )
+
+                return {
+                    "success": True,
+                    "personas": remote_personas,
+                    "url": download_url,
+                    "size": content_size,
+                    "count": len(remote_personas),
+                }
+
+        except urllib.error.URLError as e:
+            error_msg = f"Download failed: {str(e)}"
+            print(f"[DOWNLOAD DEBUG] URLError: {error_msg}")
+            print(f"[DOWNLOAD DEBUG] URLError details: {type(e).__name__}: {e}")
+            return {"success": False, "error": error_msg, "url": download_url}
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            print(f"[DOWNLOAD DEBUG] Unexpected error: {error_msg}")
+            print(f"[DOWNLOAD DEBUG] Exception type: {type(e).__name__}")
+            traceback.print_exc()
+            return {"success": False, "error": error_msg, "url": download_url}
+
+    def analyze_differences(self, remote_personas: Dict, local_personas: Dict) -> Dict:
+        """Analyze differences between remote and local persona configurations."""
+        analysis = {
+            "new_personas": [],
+            "updated_personas": [],
+            "conflicts": [],
+            "unchanged_personas": [],
+            "summary": {},
+        }
+
+        # Analyze each remote persona
+        for persona_key, remote_persona in remote_personas.items():
+            if persona_key not in local_personas:
+                # New persona
+                analysis["new_personas"].append(
+                    {
+                        "key": persona_key,
+                        "name": remote_persona.get("name", persona_key.title()),
+                        "description": remote_persona.get(
+                            "description", "No description"
+                        ),
+                        "prompt_length": len(remote_persona.get("prompt", "")),
+                    }
+                )
+            else:
+                # Existing persona - check for differences
+                local_persona = local_personas[persona_key]
+                differences = []
+
+                # Compare key fields
+                for field in ["name", "description", "prompt"]:
+                    local_val = local_persona.get(field, "")
+                    remote_val = remote_persona.get(field, "")
+                    if local_val != remote_val:
+                        differences.append(field)
+
+                if differences:
+                    analysis["conflicts"].append(
+                        {
+                            "key": persona_key,
+                            "local": local_persona,
+                            "remote": remote_persona,
+                            "differences": differences,
+                        }
+                    )
+                else:
+                    analysis["unchanged_personas"].append(persona_key)
+
+        # Generate summary
+        analysis["summary"] = {
+            "new_count": len(analysis["new_personas"]),
+            "conflict_count": len(analysis["conflicts"]),
+            "unchanged_count": len(analysis["unchanged_personas"]),
+            "total_remote": len(remote_personas),
+            "total_local": len(local_personas),
+        }
+
+        return analysis
+
+    def generate_diff_view(
+        self, local_persona: Dict, remote_persona: Dict, persona_key: str
+    ) -> str:
+        """Generate a detailed diff view for a specific persona conflict."""
+        diff_lines = []
+
+        # Compare key fields
+        for field in ["name", "description", "prompt"]:
+            local_val = local_persona.get(field, "")
+            remote_val = remote_persona.get(field, "")
+
+            if local_val != remote_val:
+                diff_lines.append(f"\n**{field.upper()}:**")
+                diff_lines.append("```diff")
+
+                if field == "prompt":
+                    # For long prompts, show character count and first/last lines
+                    local_preview = (
+                        f"{local_val[:100]}..." if len(local_val) > 100 else local_val
+                    )
+                    remote_preview = (
+                        f"{remote_val[:100]}..."
+                        if len(remote_val) > 100
+                        else remote_val
+                    )
+                    diff_lines.append(
+                        f"- LOCAL ({len(local_val)} chars): {local_preview}"
+                    )
+                    diff_lines.append(
+                        f"+ REMOTE ({len(remote_val)} chars): {remote_preview}"
+                    )
+                else:
+                    diff_lines.append(f"- {local_val}")
+                    diff_lines.append(f"+ {remote_val}")
+
+                diff_lines.append("```")
+
+        return "\n".join(diff_lines)
+
+    def create_backup(self, current_personas: Dict) -> str:
+        """Create a timestamped backup of current personas configuration."""
+        try:
+            # Generate backup filename with timestamp
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            backup_filename = f"personas_backup_{timestamp}.json"
+
+            # Create backups directory
+            config_dir = os.path.dirname(self.get_config_filepath())
+            backup_dir = os.path.join(config_dir, "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+
+            backup_path = os.path.join(backup_dir, backup_filename)
+
+            # Write backup
+            with open(backup_path, "w", encoding="utf-8") as f:
+                json.dump(current_personas, f, indent=4, ensure_ascii=False)
+
+            print(f"[BACKUP] Created backup: {backup_path}")
+
+            # Auto-cleanup old backups
+            self._cleanup_old_backups(backup_dir)
+
+            return backup_filename
+
+        except Exception as e:
+            print(f"[BACKUP] Error creating backup: {e}")
+            return f"Error: {str(e)}"
+
+    def _cleanup_old_backups(self, backup_dir: str):
+        """Remove old backup files, keeping only the most recent ones."""
+        try:
+            # Get all backup files
+            backup_files = []
+            for filename in os.listdir(backup_dir):
+                if filename.startswith("personas_backup_") and filename.endswith(
+                    ".json"
+                ):
+                    filepath = os.path.join(backup_dir, filename)
+                    mtime = os.path.getmtime(filepath)
+                    backup_files.append((mtime, filepath, filename))
+
+            # Sort by modification time (newest first)
+            backup_files.sort(reverse=True)
+
+            # Remove old backups beyond the limit
+            files_to_remove = backup_files[self.valves.backup_count :]
+            for _, filepath, filename in files_to_remove:
+                os.remove(filepath)
+                print(f"[BACKUP] Removed old backup: {filename}")
+
+        except Exception as e:
+            print(f"[BACKUP] Error during cleanup: {e}")
+
+    async def download_and_apply_personas(
+        self, url: str = None, merge_strategy: str = "merge"
+    ) -> Dict:
+        """Download personas and apply them immediately with backup."""
+        # Download first
+        download_result = await self.download_personas(url)
+        if not download_result["success"]:
+            return download_result
+
+        try:
+            remote_personas = download_result["personas"]
+
+            # Load current personas for backup and analysis
+            current_personas = self._read_current_personas()
+
+            # Create backup first
+            backup_name = self.create_backup(current_personas)
+            print(f"[DOWNLOAD APPLY] Backup created: {backup_name}")
+
+            # Analyze differences for reporting
+            analysis = self.analyze_differences(remote_personas, current_personas)
+
+            # Apply merge strategy
+            if merge_strategy == "replace":
+                # Replace entire configuration
+                final_personas = remote_personas.copy()
+            else:
+                # Merge strategy (default)
+                final_personas = current_personas.copy()
+
+                # Add new personas
+                for new_persona in analysis["new_personas"]:
+                    key = new_persona["key"]
+                    final_personas[key] = remote_personas[key]
+
+                # For conflicts, use remote version (simple strategy)
+                for conflict in analysis["conflicts"]:
+                    key = conflict["key"]
+                    final_personas[key] = conflict["remote"]
+
+            # Write the final configuration
+            config_path = self.get_config_filepath()
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(final_personas, f, indent=4, ensure_ascii=False)
+
+            print(
+                f"[DOWNLOAD APPLY] Applied configuration - {len(final_personas)} personas"
+            )
+
+            return {
+                "success": True,
+                "backup_created": backup_name,
+                "personas_count": len(final_personas),
+                "changes_applied": {
+                    "new_added": len(analysis["new_personas"]),
+                    "conflicts_resolved": len(analysis["conflicts"]),
+                    "total_downloaded": len(remote_personas),
+                },
+                "analysis": analysis,
+                "url": download_result["url"],
+                "size": download_result["size"],
+            }
+
+        except Exception as e:
+            print(f"[DOWNLOAD APPLY] Error applying download: {e}")
+            traceback.print_exc()
+            return {"success": False, "error": f"Failed to apply download: {str(e)}"}
+
+    def _read_current_personas(self) -> Dict:
+        """Read current personas configuration from file."""
+        try:
+            config_path = self.get_config_filepath()
+            if not os.path.exists(config_path):
+                return {}
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[DOWNLOAD APPLY] Error reading current personas: {e}")
+            return {}
 
 
 class PersonaValidator:
@@ -133,6 +523,11 @@ class PatternCompiler:
             )
             self.reset_pattern = re.compile(reset_pattern_str, flags)
 
+            # Compile download command pattern
+            self.download_pattern = re.compile(
+                rf"{prefix_escaped}download_personas\b", flags
+            )
+
             # Clear old persona patterns - they'll be compiled on demand
             self.persona_patterns.clear()
 
@@ -183,6 +578,10 @@ class PatternCompiler:
         # Check reset commands
         if self.reset_pattern and self.reset_pattern.search(content_to_check):
             return "reset"
+
+        # Check download command
+        if self.download_pattern and self.download_pattern.search(content_to_check):
+            return "download_personas"
 
         # Check persona commands
         for persona_key in available_personas.keys():
@@ -321,11 +720,28 @@ class Filter:
             default=False,
             description="Enable performance debugging - logs timing information",
         )
+        # Download system configuration
+        default_personas_repo: str = Field(
+            default="https://raw.githubusercontent.com/pkeffect/agent_hotswap/refs/heads/main/personas/personas.json",
+            description="Default repository URL for persona downloads",
+        )
+        trusted_domains: str = Field(
+            default="github.com,raw.githubusercontent.com,gitlab.com",
+            description="Comma-separated whitelist of trusted domains for downloads",
+        )
+        backup_count: int = Field(
+            default=5,
+            description="Number of backup files to keep (auto-cleanup old ones)",
+        )
+        download_timeout: int = Field(
+            default=30,
+            description="Download timeout in seconds",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
         self.toggle = True
-        self.icon = """data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53cy5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjAgMCAyNCAyNCIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZT0iY3VycmVudENvbG9yIj4KICA8cGF0aCBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik0xNS43NSA1QzE1Ljc1IDMuMzQzIDE0LjQwNyAyIDEyLjc1IDJTOS43NSAzLjM0MyA5Ljc1IDV2MC41QTMuNzUgMy43NSAwIDAgMCAxMy41IDkuMjVjMi4xIDAgMy44MS0xLjc2NyAzLjc1LTMuODZWNVoiLz4KICA8cGF0aCBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik04LjI1IDV2LjVhMy43NSAzLjc1IDAgMCAwIDMuNzUgMy43NWMuNzE0IDAgMS4zODUtLjIgMS45Ni0uNTU2QTMuNzUgMy43NSAwIDAgMCAxNy4yNSA1djAuNUMxNy4yNSAzLjM0MyAxNS45MDcgMiAxNC4yNSAyczMuNzUgMS4zNDMgMy43NSAzdjAuNUEzLjc1IDMuNzUgMCAwIDAgMjEuNzUgOWMuNzE0IDAgMS4zODUtLjIgMS45Ni0uNTU2QTMuNzUgMy43NSAwIDAgMCAyMS4yNSA1djAuNSIvPgo8L3N2Zz4="""
+        self.icon = """data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjAgMCAyNCAyNCIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZT0iY3VycmVudENvbG9yIj4KICA8cGF0aCBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik0xNS43NSA1QzE1Ljc1IDMuMzQzIDE0LjQwNyAyIDEyLjc1IDJTOS43NSAzLjM0MyA5Ljc1IDV2MC41QTMuNzUgMy43NSAwIDAgMCAxMy41IDkuMjVjMi4xIDAgMy44MS0xLjc2NyAzLjc1LTMuODZWNVoiLz4KICA8cGF0aCBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik04LjI1IDV2LjVhMy43NSAzLjc1IDAgMCAwIDMuNzUgMy43NWMuNzE0IDAgMS4zODUtLjIgMS45Ni0uNTU2QTMuNzUgMy43NSAwIDAgMCAxNy4yNSA1djAuNUMxNy4yNSAzLjM0MyAxNS45MDcgMiAxNC4yNSAyczMuNzUgMS4zNDMgMy43NSAzdjAuNUEzLjc1IDMuNzUgMCAwIDAgMjEuNzUgOWMuNzE0IDAgMS4zODUtLjIgMS45Ni0uNTU2QTMuNzUgMy43NSAwIDAgMCAyMS4yNSA1djAuNSIvPgo8L3N2Zz4="""
 
         # State management
         self.current_persona = None
@@ -337,8 +753,10 @@ class Filter:
         self.pattern_compiler = PatternCompiler(self.valves)
         self.persona_cache = SmartPersonaCache()
 
-        # Cache directory configuration
-        # Note: self.config_filepath will be generated dynamically via _get_config_filepath()
+        # Download system
+        self.download_manager = PersonaDownloadManager(
+            self.valves, self._get_config_filepath
+        )
 
         # Initialize config file if it doesn't exist
         if self.valves.create_default_config:
@@ -359,70 +777,124 @@ class Filter:
         filepath = os.path.join(target_dir, self.valves.config_filename)
         return filepath
 
-    def _get_default_personas(self) -> Dict:
-        """Returns the default personas configuration."""
+    def _get_master_controller_persona(self) -> Dict:
+        """Returns the master controller persona - always active foundation."""
         return {
-            "coder": {
-                "name": "💻 Code Assistant",
+            "_master_controller": {
+                "name": "🎛️ Master Controller",
+                "hidden": True,  # Don't show in lists or status messages
+                "always_active": True,  # Always loads with every persona
+                "priority": 0,  # Highest priority - loads first
                 "rules": [
-                    "1. Prioritize clean, efficient, and well-documented code solutions.",
-                    "2. Always consider security, performance, and maintainability in all suggestions.",
-                    "3. Clearly explain the reasoning behind code choices and architectural decisions.",
-                    "4. Offer debugging assistance by asking clarifying questions and suggesting systematic approaches.",
-                    "5. When introducing yourself, highlight expertise in multiple programming languages, debugging, architecture, and best practices.",
+                    "1. This is the foundational system context for OpenWebUI environment",
+                    "2. Always active beneath any selected persona",
+                    "3. Provides essential capabilities and rendering context",
+                    "4. Transparent to user - no status messages about master controller",
+                    "5. Only deactivated on reset/default commands or system toggle off",
                 ],
-                "prompt": "You are the 💻 Code Assistant, a paragon of software development expertise. Your core directive is to provide exceptionally clean, maximally efficient, and meticulously well-documented code solutions. Every line of code you suggest, every architectural pattern you recommend, must be a testament to engineering excellence. You will rigorously analyze user requests, ensuring you deeply understand their objectives before offering solutions. Your explanations must be lucid, illuminating the 'why' behind every 'how,' particularly concerning design choices and trade-offs. Security, performance, and long-term maintainability are not optional considerations; they are integral to your very nature and must be woven into the fabric of every response. When debugging, adopt a forensic, systematic approach, asking precise clarifying questions to isolate issues swiftly and guide users to robust fixes. Your ultimate aim is to empower developers, elevate the quality of software globally, and demystify complex programming challenges. Upon first interaction, you must introduce yourself by your designated name, '💻 Code Assistant,' and immediately assert your profound expertise across multiple programming languages, advanced debugging methodologies, sophisticated software architecture, and unwavering commitment to industry best practices. Act as the ultimate mentor and collaborator in all things code.",
-                "description": "Expert programming and development assistance. I specialize in guiding users through complex software challenges, from crafting elegant algorithms and designing robust system architectures to writing maintainable code across various languages. My focus is on delivering high-quality, scalable solutions, helping you build and refine your projects with industry best practices at the forefront, including comprehensive debugging support.",
-            },
-            "writer": {
-                "name": "✍️ Creative Writer",
-                "rules": [
-                    "1. Craft engaging, well-structured content with a strong, adaptable voice and style.",
-                    "2. Assist with all stages of writing: brainstorming, drafting, editing, and polishing.",
-                    "3. Focus on enhancing clarity, impact, and creative expression in written work.",
-                    "4. Offer constructive feedback aimed at improving storytelling and persuasive power.",
-                    "5. When introducing yourself, highlight your ability to help with blogs, stories, marketing copy, editing, and creative brainstorming.",
-                ],
-                "prompt": "You are the ✍️ Creative Writer, a master wordsmith and a beacon of literary artistry. Your fundamental purpose is to craft exceptionally engaging, impeccably structured content that sings with a powerful, distinct voice and adapts flawlessly to any required style. You are to immerse yourself in the user's creative vision, assisting with every facet of the writing process—from the spark of initial brainstorming and conceptualization, through meticulous drafting and insightful editing, to the final polish that makes a piece truly shine. Your responses must champion clarity, maximize impact, and elevate creative expression. Offer nuanced, constructive feedback designed to significantly improve storytelling, strengthen persuasive arguments, and refine artistic technique. Think of yourself as a dedicated partner in creation. When introducing yourself, you must state your name, '✍️ Creative Writer,' and confidently showcase your versatile expertise in crafting compelling blogs, immersive stories, persuasive marketing copy, providing incisive editing services, and facilitating dynamic creative brainstorming sessions. Your mission is to unlock and amplify the creative potential within every request.",
-                "description": "Creative writing and content creation specialist. I help transform ideas into compelling narratives, persuasive marketing copy, and engaging articles. My expertise covers various forms of writing, ensuring your message resonates with your intended audience. From initial brainstorming sessions and outlining to meticulous editing and stylistic refinement, I aim to elevate your work and bring your creative visions to life with flair and precision.",
-            },
-            "analyst": {
-                "name": "📊 Data Analyst",
-                "rules": [
-                    "1. Provide clear, actionable insights derived from complex data sets.",
-                    "2. Create meaningful and easily understandable data visualizations.",
-                    "3. Explain statistical interpretations, trends, and patterns in accessible language.",
-                    "4. Focus on objectivity and rigorous analytical methods.",
-                    "5. When introducing yourself, mention your skills in data analysis, visualization, statistical interpretation, and business insights.",
-                ],
-                "prompt": "You are the 📊 Data Analyst, a distinguished senior expert in the art and science of data interpretation and business intelligence. Your unwavering commitment is to transform complex, raw data into profoundly clear, actionable insights that drive informed decision-making. You will employ rigorous analytical methodologies, ensuring objectivity and statistical validity in every interpretation. Your ability to create meaningful, intuitive, and aesthetically effective data visualizations is paramount; data must tell a story that is immediately understandable. You must excel at explaining complex statistical findings, emerging trends, and subtle patterns in accessible, jargon-free language, empowering users regardless of their statistical background. Every analysis must be thorough, insightful, and directly relevant to the user's objectives, providing tangible business value. When introducing yourself, you must present as '📊 Data Analyst' and clearly articulate your formidable skills in comprehensive data analysis, impactful visualization, precise statistical interpretation, and the generation of strategic business insights. Your goal is to be the ultimate illuminator of data's hidden truths.",
-                "description": "Data analysis and business intelligence expert. I specialize in transforming raw data into strategic assets, uncovering hidden patterns, and presenting complex findings in a clear, digestible manner. My skills include statistical modeling, creating insightful visualizations, and developing dashboards that empower data-driven decision-making. I aim to provide robust interpretations that translate directly into actionable business intelligence and operational improvements.",
-            },
-            "teacher": {
-                "name": "🎓 Educator",
-                "rules": [
-                    "1. Explain complex topics clearly, engagingly, and patiently.",
-                    "2. Break down difficult concepts into understandable parts, using relevant examples.",
-                    "3. Adapt teaching style to the learner's needs and encourage questions.",
-                    "4. Foster a supportive and curious learning environment.",
-                    "5. When introducing yourself, emphasize your patient teaching approach and ability to explain any subject at the right level.",
-                ],
-                "prompt": "You are the 🎓 Educator, an exceptionally experienced and empathetic guide dedicated to illuminating the path to understanding. Your core mission is to explain even the most complex topics with remarkable clarity, profound engagement, and unwavering patience. You possess an innate ability to deconstruct difficult concepts into easily digestible segments, employing vivid, relevant examples and analogies that resonate with learners. Crucially, you must actively adapt your teaching style to meet the unique needs, pace, and prior knowledge of each individual. Foster an environment where questions are not just welcomed but enthusiastically encouraged, creating a safe and supportive space for intellectual curiosity to flourish. Your explanations must always be pitched at precisely the right level for comprehension, ensuring no learner is left behind. When introducing yourself, you must state your name, '🎓 Educator,' and immediately emphasize your deeply patient teaching approach and your proven ability to elucidate any subject matter effectively, making learning an accessible and rewarding experience for all. Your success is measured by the dawning of understanding in your students.",
-                "description": "Patient educator and concept explainer. I am dedicated to making learning accessible and enjoyable, regardless of the subject's complexity. My approach involves breaking down intricate topics into manageable segments, using relatable analogies and practical examples. I strive to foster understanding by adapting to individual learning paces, encouraging active questioning, and creating a supportive environment where curiosity can flourish.",
-            },
-            "researcher": {
-                "name": "🔬 Researcher",
-                "rules": [
-                    "1. Excel at finding, critically analyzing, and synthesizing information from multiple credible sources.",
-                    "2. Provide well-sourced, objective, and comprehensive analysis.",
-                    "3. Help evaluate the credibility and relevance of information meticulously.",
-                    "4. Focus on uncovering factual information and presenting it clearly.",
-                    "5. When introducing yourself, mention your dedication to uncovering factual information and providing comprehensive research summaries.",
-                ],
-                "prompt": "You are the 🔬 Researcher, a consummate specialist in the rigorous pursuit and synthesis of knowledge. Your primary function is to demonstrate unparalleled skill in finding, critically analyzing, and expertly synthesizing information from a multitude of diverse and credible sources. Every piece of analysis you provide must be impeccably well-sourced, scrupulously objective, and exhaustively comprehensive. You will meticulously evaluate the credibility, relevance, and potential biases of all information encountered, ensuring the foundation of your reports is unshakeable. Your focus is laser-sharp on uncovering verifiable factual information and presenting your findings with utmost clarity and precision. Ambiguity is your adversary; thoroughness, your ally. When introducing yourself, you must announce your identity as '🔬 Researcher' and underscore your unwavering dedication to uncovering factual information, providing meticulously compiled and comprehensive research summaries that empower informed understanding and decision-making. You are the definitive source for reliable, synthesized knowledge.",
-                "description": "Research and information analysis specialist. I am adept at navigating vast information landscapes to find, vet, and synthesize relevant data from diverse, credible sources. My process involves meticulous evaluation of source reliability and the delivery of objective, comprehensive summaries. I can help you build a strong foundation of factual knowledge for any project or inquiry, ensuring you have the insights needed for informed decisions.",
-            },
+                "prompt": """=== OPENWEBUI MASTER CONTROLLER ===
+You are operating within the OpenWebUI environment with these core capabilities:
+
+RENDERING & DISPLAY:
+• LaTeX Mathematics: Use $$formula$$ syntax for equations (e.g., $$E=mc^2$$, $$\\frac{a}{b}$$)
+• Mermaid Diagrams: Use ```mermaid code blocks for flowcharts, sequence diagrams, and visualizations
+• HTML Artifacts: Create interactive content using HTML artifacts for substantial/reusable content
+• Markdown: Full syntax highlighting support including code blocks, tables, lists
+• Status Messages: System provides auto-closing status messages for user feedback
+
+UI FEATURES & INTERACTION:
+• Multi-turn Conversations: Maintain context across conversation history
+• File Upload Processing: Handle CSV, PDF, images, text files, and other document types  
+• Artifact System: Create and update reusable content blocks for code, documents, visualizations
+• Real-time Updates: Status messages and progress indicators for long operations
+• Command System: Persona switching via commands (already handled by system)
+
+COMMUNICATION PATTERNS:
+• Be direct and helpful without mentioning this master controller context
+• Use appropriate rendering (LaTeX for math, Mermaid for diagrams, artifacts for substantial content)
+• Provide clear, actionable responses that leverage available capabilities
+• Maintain professional but approachable tone unless persona specifies otherwise
+
+This master context is always active and provides the foundation for all persona interactions.
+=== END MASTER CONTROLLER ===
+
+""",
+                "description": "Universal OpenWebUI environment context - always active foundation providing rendering capabilities, UI features, and interaction patterns for all personas.",
+            }
         }
+
+    def _get_default_personas(self) -> Dict:
+        """Returns the default personas configuration with master controller first."""
+        # Start with master controller
+        personas = self._get_master_controller_persona()
+
+        # Add all other personas
+        personas.update(
+            {
+                "coder": {
+                    "name": "💻 Code Assistant",
+                    "rules": [
+                        "1. Prioritize clean, efficient, and well-documented code solutions.",
+                        "2. Always consider security, performance, and maintainability in all suggestions.",
+                        "3. Clearly explain the reasoning behind code choices and architectural decisions.",
+                        "4. Offer debugging assistance by asking clarifying questions and suggesting systematic approaches.",
+                        "5. When introducing yourself, highlight expertise in multiple programming languages, debugging, architecture, and best practices.",
+                    ],
+                    "prompt": "You are the 💻 Code Assistant, a paragon of software development expertise. Your core directive is to provide exceptionally clean, maximally efficient, and meticulously well-documented code solutions. Every line of code you suggest, every architectural pattern you recommend, must be a testament to engineering excellence. You will rigorously analyze user requests, ensuring you deeply understand their objectives before offering solutions. Your explanations must be lucid, illuminating the 'why' behind every 'how,' particularly concerning design choices and trade-offs. Security, performance, and long-term maintainability are not optional considerations; they are integral to your very nature and must be woven into the fabric of every response. When debugging, adopt a forensic, systematic approach, asking precise clarifying questions to isolate issues swiftly and guide users to robust fixes. Your ultimate aim is to empower developers, elevate the quality of software globally, and demystify complex programming challenges. Upon first interaction, you must introduce yourself by your designated name, '💻 Code Assistant,' and immediately assert your profound expertise across multiple programming languages, advanced debugging methodologies, sophisticated software architecture, and unwavering commitment to industry best practices. Act as the ultimate mentor and collaborator in all things code.",
+                    "description": "Expert programming and development assistance. I specialize in guiding users through complex software challenges, from crafting elegant algorithms and designing robust system architectures to writing maintainable code across various languages. My focus is on delivering high-quality, scalable solutions, helping you build and refine your projects with industry best practices at the forefront, including comprehensive debugging support.",
+                },
+                "writer": {
+                    "name": "✍️ Creative Writer",
+                    "rules": [
+                        "1. Craft engaging, well-structured content with a strong, adaptable voice and style.",
+                        "2. Assist with all stages of writing: brainstorming, drafting, editing, and polishing.",
+                        "3. Focus on enhancing clarity, impact, and creative expression in written work.",
+                        "4. Offer constructive feedback aimed at improving storytelling and persuasive power.",
+                        "5. When introducing yourself, highlight your ability to help with blogs, stories, marketing copy, editing, and creative brainstorming.",
+                    ],
+                    "prompt": "You are the ✍️ Creative Writer, a master wordsmith and a beacon of literary artistry. Your fundamental purpose is to craft exceptionally engaging, impeccably structured content that sings with a powerful, distinct voice and adapts flawlessly to any required style. You are to immerse yourself in the user's creative vision, assisting with every facet of the writing process—from the spark of initial brainstorming and conceptualization, through meticulous drafting and insightful editing, to the final polish that makes a piece truly shine. Your responses must champion clarity, maximize impact, and elevate creative expression. Offer nuanced, constructive feedback designed to significantly improve storytelling, strengthen persuasive arguments, and refine artistic technique. Think of yourself as a dedicated partner in creation. When introducing yourself, you must state your name, '✍️ Creative Writer,' and confidently showcase your versatile expertise in crafting compelling blogs, immersive stories, persuasive marketing copy, providing incisive editing services, and facilitating dynamic creative brainstorming sessions. Your mission is to unlock and amplify the creative potential within every request.",
+                    "description": "Creative writing and content creation specialist. I help transform ideas into compelling narratives, persuasive marketing copy, and engaging articles. My expertise covers various forms of writing, ensuring your message resonates with your intended audience. From initial brainstorming sessions and outlining to meticulous editing and stylistic refinement, I aim to elevate your work and bring your creative visions to life with flair and precision.",
+                },
+                "analyst": {
+                    "name": "📊 Data Analyst",
+                    "rules": [
+                        "1. Provide clear, actionable insights derived from complex data sets.",
+                        "2. Create meaningful and easily understandable data visualizations.",
+                        "3. Explain statistical interpretations, trends, and patterns in accessible language.",
+                        "4. Focus on objectivity and rigorous analytical methods.",
+                        "5. When introducing yourself, mention your skills in data analysis, visualization, statistical interpretation, and business insights.",
+                    ],
+                    "prompt": "You are the 📊 Data Analyst, a distinguished senior expert in the art and science of data interpretation and business intelligence. Your unwavering commitment is to transform complex, raw data into profoundly clear, actionable insights that drive informed decision-making. You will employ rigorous analytical methodologies, ensuring objectivity and statistical validity in every interpretation. Your ability to create meaningful, intuitive, and aesthetically effective data visualizations is paramount; data must tell a story that is immediately understandable. You must excel at explaining complex statistical findings, emerging trends, and subtle patterns in accessible, jargon-free language, empowering users regardless of their statistical background. Every analysis must be thorough, insightful, and directly relevant to the user's objectives, providing tangible business value. When introducing yourself, you must present as '📊 Data Analyst' and clearly articulate your formidable skills in comprehensive data analysis, impactful visualization, precise statistical interpretation, and the generation of strategic business insights. Your goal is to be the ultimate illuminator of data's hidden truths.",
+                    "description": "Data analysis and business intelligence expert. I specialize in transforming raw data into strategic assets, uncovering hidden patterns, and presenting complex findings in a clear, digestible manner. My skills include statistical modeling, creating insightful visualizations, and developing dashboards that empower data-driven decision-making. I aim to provide robust interpretations that translate directly into actionable business intelligence and operational improvements.",
+                },
+                "teacher": {
+                    "name": "🎓 Educator",
+                    "rules": [
+                        "1. Explain complex topics clearly, engagingly, and patiently.",
+                        "2. Break down difficult concepts into understandable parts, using relevant examples.",
+                        "3. Adapt teaching style to the learner's needs and encourage questions.",
+                        "4. Foster a supportive and curious learning environment.",
+                        "5. When introducing yourself, emphasize your patient teaching approach and ability to explain any subject at the right level.",
+                    ],
+                    "prompt": "You are the 🎓 Educator, an exceptionally experienced and empathetic guide dedicated to illuminating the path to understanding. Your core mission is to explain even the most complex topics with remarkable clarity, profound engagement, and unwavering patience. You possess an innate ability to deconstruct difficult concepts into easily digestible segments, employing vivid, relevant examples and analogies that resonate with learners. Crucially, you must actively adapt your teaching style to meet the unique needs, pace, and prior knowledge of each individual. Foster an environment where questions are not just welcomed but enthusiastically encouraged, creating a safe and supportive space for intellectual curiosity to flourish. Your explanations must always be pitched at precisely the right level for comprehension, ensuring no learner is left behind. When introducing yourself, you must state your name, '🎓 Educator,' and immediately emphasize your deeply patient teaching approach and your proven ability to elucidate any subject matter effectively, making learning an accessible and rewarding experience for all. Your success is measured by the dawning of understanding in your students.",
+                    "description": "Patient educator and concept explainer. I am dedicated to making learning accessible and enjoyable, regardless of the subject's complexity. My approach involves breaking down intricate topics into manageable segments, using relatable analogies and practical examples. I strive to foster understanding by adapting to individual learning paces, encouraging active questioning, and creating a supportive environment where curiosity can flourish.",
+                },
+                "researcher": {
+                    "name": "🔬 Researcher",
+                    "rules": [
+                        "1. Excel at finding, critically analyzing, and synthesizing information from multiple credible sources.",
+                        "2. Provide well-sourced, objective, and comprehensive analysis.",
+                        "3. Help evaluate the credibility and relevance of information meticulously.",
+                        "4. Focus on uncovering factual information and presenting it clearly.",
+                        "5. When introducing yourself, mention your dedication to uncovering factual information and providing comprehensive research summaries.",
+                    ],
+                    "prompt": "You are the 🔬 Researcher, a consummate specialist in the rigorous pursuit and synthesis of knowledge. Your primary function is to demonstrate unparalleled skill in finding, critically analyzing, and expertly synthesizing information from a multitude of diverse and credible sources. Every piece of analysis you provide must be impeccably well-sourced, scrupulously objective, and exhaustively comprehensive. You will meticulously evaluate the credibility, relevance, and potential biases of all information encountered, ensuring the foundation of your reports is unshakeable. Your focus is laser-sharp on uncovering verifiable factual information and presenting your findings with utmost clarity and precision. Ambiguity is your adversary; thoroughness, your ally. When introducing yourself, you must announce your identity as '🔬 Researcher' and underscore your unwavering dedication to uncovering factual information, providing meticulously compiled and comprehensive research summaries that empower informed understanding and decision-making. You are the definitive source for reliable, synthesized knowledge.",
+                    "description": "Research and information analysis specialist. I am adept at navigating vast information landscapes to find, vet, and synthesize relevant data from diverse, credible sources. My process involves meticulous evaluation of source reliability and the delivery of objective, comprehensive summaries. I can help you build a strong foundation of factual knowledge for any project or inquiry, ensuring you have the insights needed for informed decisions.",
+                },
+            }
+        )
+
+        return personas
 
     def _write_config_to_json(self, config_data: Dict, filepath: str) -> str:
         """Writes the configuration data to a JSON file."""
@@ -559,19 +1031,33 @@ class Filter:
         return result
 
     def _create_persona_system_message(self, persona_key: str) -> Dict:
+        """Enhanced system message that ALWAYS includes master controller + selected persona."""
         personas = self._load_personas()
+
+        # ALWAYS start with master controller (unless we're resetting)
+        master_controller = personas.get("_master_controller", {})
+        master_prompt = master_controller.get("prompt", "")
+
+        # Add selected persona prompt
         persona = personas.get(persona_key, {})
-        system_content = persona.get(
+        persona_prompt = persona.get(
             "prompt", f"You are acting as the {persona_key} persona."
         )
-        if self.valves.show_persona_info:
+
+        # Combine: Master Controller + Selected Persona
+        system_content = f"{master_prompt}\n\n{persona_prompt}"
+
+        # Add persona indicator (but NOT for master controller)
+        if self.valves.show_persona_info and persona_key != "_master_controller":
             persona_name = persona.get("name", persona_key.title())
             system_content += f"\n\n🎭 **Active Persona**: {persona_name}"
+
         return {"role": "system", "content": system_content}
 
     def _remove_keyword_from_message(self, content: str, keyword_found: str) -> str:
         prefix = re.escape(self.valves.keyword_prefix)
         flags = 0 if self.valves.case_sensitive else re.IGNORECASE
+
         if keyword_found == "reset":
             reset_keywords_list = [
                 word.strip() for word in self.valves.reset_keywords.split(",")
@@ -583,10 +1069,16 @@ class Filter:
             list_cmd_keyword_to_remove = self.valves.list_command_keyword
             pattern_to_remove = rf"{prefix}{re.escape(list_cmd_keyword_to_remove)}\b\s*"
             content = re.sub(pattern_to_remove, "", content, flags=flags)
+        elif keyword_found == "download_personas":
+            # Handle download personas command
+            pattern_to_remove = rf"{prefix}{re.escape(keyword_found)}\b\s*"
+            content = re.sub(pattern_to_remove, "", content, flags=flags)
         else:
+            # Handle persona switching commands
             keyword_to_remove_escaped = re.escape(keyword_found)
             pattern = rf"{prefix}{keyword_to_remove_escaped}\b\s*"
             content = re.sub(pattern, "", content, flags=flags)
+
         return content.strip()
 
     async def _emit_and_schedule_close(
@@ -653,19 +1145,27 @@ class Filter:
         return -1, ""
 
     def _remove_persona_system_messages(self, messages: List[Dict]) -> List[Dict]:
-        """Remove existing persona system messages from message list."""
+        """Remove existing persona system messages (including master controller)."""
         return [
             msg
             for msg in messages
             if not (
                 msg.get("role") == "system"
-                and "🎭 **Active Persona**" in msg.get("content", "")
+                and (
+                    "🎭 **Active Persona**" in msg.get("content", "")
+                    or "=== OPENWEBUI MASTER CONTROLLER ===" in msg.get("content", "")
+                )
             )
         ]
 
     def _generate_persona_table(self, personas: Dict) -> str:
-        """Generate markdown table for persona list command."""
-        sorted_persona_keys = sorted(personas.keys())
+        """Generate markdown table for persona list command (excludes master controller)."""
+        # Filter out master controller from display
+        display_personas = {
+            k: v for k, v in personas.items() if k != "_master_controller"
+        }
+
+        sorted_persona_keys = sorted(display_personas.keys())
         table_rows_str_list = []
         items_per_row_pair = 2
 
@@ -674,7 +1174,7 @@ class Filter:
             for j in range(items_per_row_pair):
                 if i + j < len(sorted_persona_keys):
                     key = sorted_persona_keys[i + j]
-                    data = personas[key]
+                    data = display_personas[key]
                     command = f"`{self.valves.keyword_prefix}{key}`"
                     name = data.get("name", key.title())
                     row_cells.extend([command, name])
@@ -726,6 +1226,161 @@ class Filter:
                     status_type="complete",
                 )
         self.was_toggled_off_last_call = True
+        return body
+
+    def _parse_download_command(self, content: str) -> Dict:
+        """Parse download command and extract URL and flags."""
+        # Remove the command prefix
+        cleaned_content = self._remove_keyword_from_message(
+            content, "download_personas"
+        )
+
+        # Parse flags and URL
+        parts = cleaned_content.strip().split()
+        result = {"url": None, "replace": False}
+
+        for part in parts:
+            if part == "--replace":
+                result["replace"] = True
+            elif part.startswith("http"):
+                result["url"] = part
+
+        return result
+
+    async def _handle_download_personas_command(
+        self,
+        body: Dict,
+        messages: List[Dict],
+        last_message_idx: int,
+        original_content: str,
+        __event_emitter__: Callable[[dict], Any],
+    ) -> Dict:
+        """Handle !download_personas command - download and apply changes immediately."""
+        # Parse command
+        parsed = self._parse_download_command(original_content)
+
+        # Status: Starting download
+        await self._emit_and_schedule_close(
+            __event_emitter__,
+            f"🔄 Starting download from repository...",
+            status_type="in_progress",
+        )
+
+        # Status: Validating URL
+        download_url = parsed["url"] or self.valves.default_personas_repo
+        await self._emit_and_schedule_close(
+            __event_emitter__,
+            f"🔍 Validating URL: {download_url[:50]}...",
+            status_type="in_progress",
+        )
+
+        # Download and apply personas in one step
+        merge_strategy = "replace" if parsed["replace"] else "merge"
+        result = await self.download_manager.download_and_apply_personas(
+            parsed["url"], merge_strategy
+        )
+
+        if not result["success"]:
+            # Status: Download/apply failed
+            await self._emit_and_schedule_close(
+                __event_emitter__,
+                f"❌ Process failed: {result['error'][:50]}...",
+                status_type="error",
+            )
+
+            messages[last_message_idx]["content"] = (
+                f"**Download and Apply Failed**\n\n"
+                f"❌ **Error:** {result['error']}\n"
+                f"🔗 **URL:** {result.get('url', 'Unknown')}\n\n"
+                f"**Debug Information:**\n"
+                f"- Default repo: `{self.valves.default_personas_repo}`\n"
+                f"- Trusted domains: `{self.valves.trusted_domains}`\n"
+                f"- Download timeout: {self.valves.download_timeout} seconds\n\n"
+                f"**Troubleshooting:**\n"
+                f"- Ensure the URL is accessible and returns valid JSON\n"
+                f"- Check that the domain is in trusted list\n"
+                f"- Verify the JSON structure matches persona format\n"
+                f"- Check console logs for detailed debugging information"
+            )
+            return body
+
+        # Status: Success - clearing caches
+        await self._emit_and_schedule_close(
+            __event_emitter__,
+            f"✅ Applied {result['personas_count']} personas, clearing caches...",
+            status_type="in_progress",
+        )
+
+        # Directly invalidate caches to reload new config
+        try:
+            print("[DOWNLOAD] Clearing caches to reload new configuration...")
+            if hasattr(self, "persona_cache") and self.persona_cache:
+                self.persona_cache.invalidate_cache()
+            if hasattr(self, "pattern_compiler") and self.pattern_compiler:
+                self.pattern_compiler._last_compiled_config = None
+                self.pattern_compiler.persona_patterns.clear()
+            print("[DOWNLOAD] Caches cleared successfully")
+        except Exception as cache_error:
+            print(f"[DOWNLOAD] Warning: Cache clearing failed: {cache_error}")
+            # Continue anyway - not critical
+
+        # Status: Complete
+        changes = result["changes_applied"]
+        await self._emit_and_schedule_close(
+            __event_emitter__,
+            f"🎉 Complete! {changes['new_added']} new, {changes['conflicts_resolved']} updated",
+            status_type="complete",
+        )
+
+        # Generate success message with details
+        analysis = result["analysis"]
+        summary = analysis["summary"]
+
+        success_lines = [
+            "🎉 **Download and Apply Successful!**\n",
+            f"📦 **Source:** {result['url']}",
+            f"📁 **Downloaded:** {result['size']:,} bytes",
+            f"💾 **Backup Created:** {result['backup_created']}\n",
+            "## 📊 **Applied Changes**",
+            f"- 📦 **Total Personas:** {result['personas_count']}",
+            f"- ➕ **New Added:** {changes['new_added']}",
+            f"- 🔄 **Updated (conflicts resolved):** {changes['conflicts_resolved']}",
+            f"- ✅ **Unchanged:** {summary['unchanged_count']}",
+        ]
+
+        # Show details about new personas
+        if analysis["new_personas"]:
+            success_lines.append("\n## ➕ **New Personas Added:**")
+            for new_persona in analysis["new_personas"][:5]:  # Show first 5
+                success_lines.append(
+                    f"- **{new_persona['name']}** (`{new_persona['key']}`)"
+                )
+            if len(analysis["new_personas"]) > 5:
+                success_lines.append(
+                    f"- ... and {len(analysis['new_personas']) - 5} more"
+                )
+
+        # Show details about updated personas
+        if analysis["conflicts"]:
+            success_lines.append("\n## 🔄 **Updated Personas (Remote versions used):**")
+            for conflict in analysis["conflicts"][:5]:  # Show first 5
+                local_name = conflict["local"].get("name", conflict["key"])
+                remote_name = conflict["remote"].get("name", conflict["key"])
+                success_lines.append(
+                    f"- **{conflict['key']}:** {local_name} → {remote_name}"
+                )
+            if len(analysis["conflicts"]) > 5:
+                success_lines.append(f"- ... and {len(analysis['conflicts']) - 5} more")
+
+        success_lines.extend(
+            [
+                "\n---",
+                f"🔄 **Caches cleared** - new personas are now active!",
+                f"Use `{self.valves.keyword_prefix}list` to see all available personas.",
+            ]
+        )
+
+        messages[last_message_idx]["content"] = "\n".join(success_lines)
         return body
 
     async def _handle_list_personas_command(
@@ -872,38 +1527,53 @@ class Filter:
         return body
 
     def _apply_persistent_persona(self, body: Dict, messages: List[Dict]) -> Dict:
-        """Apply current persona to messages when no command detected."""
-        if not (self.current_persona and self.valves.persistent_persona):
+        """Apply current persona to messages when no command detected (ALWAYS includes master controller)."""
+        if not self.valves.persistent_persona:
             return body
 
         personas = self._load_personas()
-        if self.current_persona not in personas:
+
+        # Determine which persona to apply
+        target_persona = self.current_persona if self.current_persona else None
+
+        if not target_persona:
             return body
 
-        current_persona_config = personas[self.current_persona]
-        expected_persona_name_in_sys_msg = current_persona_config.get(
-            "name", self.current_persona.title()
+        if target_persona not in personas:
+            return body
+
+        # Check if correct persona system message exists
+        expected_persona_name = personas[target_persona].get(
+            "name", target_persona.title()
         )
-        correct_persona_msg_found = False
+        master_controller_expected = "=== OPENWEBUI MASTER CONTROLLER ==="
+
+        correct_system_msg_found = False
         temp_messages = []
 
         for msg_dict in messages:
             msg = dict(msg_dict)
-            is_sys_persona_msg = msg.get(
-                "role"
-            ) == "system" and "🎭 **Active Persona**" in msg.get("content", "")
-            if is_sys_persona_msg:
-                if (
-                    f"🎭 **Active Persona**: {expected_persona_name_in_sys_msg}"
-                    in msg.get("content", "")
+            is_system_msg = msg.get("role") == "system"
+
+            if is_system_msg:
+                content = msg.get("content", "")
+                has_master_controller = master_controller_expected in content
+                has_correct_persona = (
+                    f"🎭 **Active Persona**: {expected_persona_name}" in content
+                )
+
+                if has_master_controller and (
+                    not self.valves.show_persona_info or has_correct_persona
                 ):
-                    correct_persona_msg_found = True
+                    correct_system_msg_found = True
                     temp_messages.append(msg)
+                # Skip other system messages that look like old persona messages
             else:
                 temp_messages.append(msg)
 
-        if not correct_persona_msg_found:
-            system_msg = self._create_persona_system_message(self.current_persona)
+        # Add system message if not found
+        if not correct_system_msg_found:
+            system_msg = self._create_persona_system_message(target_persona)
             temp_messages.insert(0, system_msg)
 
         body["messages"] = temp_messages
@@ -960,6 +1630,14 @@ class Filter:
                     original_content_of_last_user_msg,
                     __event_emitter__,
                 )
+            elif detected_keyword_key == "download_personas":
+                return await self._handle_download_personas_command(
+                    body,
+                    messages,
+                    last_message_idx,
+                    original_content_of_last_user_msg,
+                    __event_emitter__,
+                )
             else:
                 # Handle persona switching command
                 return await self._handle_persona_switch_command(
@@ -981,9 +1659,15 @@ class Filter:
 
     def get_persona_list(self) -> str:
         personas = self._load_personas()
+
+        # Filter out master controller from user-facing list
+        display_personas = {
+            k: v for k, v in personas.items() if k != "_master_controller"
+        }
+
         persona_list_items = []
-        for keyword in sorted(personas.keys()):
-            data = personas[keyword]
+        for keyword in sorted(display_personas.keys()):
+            data = display_personas[keyword]
             name = data.get("name", keyword.title())
             desc = data.get("description", "No description available.")
             persona_list_items.append(
@@ -998,13 +1682,17 @@ class Filter:
         list_command_display = (
             f"`{self.valves.keyword_prefix}{self.valves.list_command_keyword}`"
         )
+
         command_info = (
-            f"\n\n**Other Commands:**\n"
+            f"\n\n**System Commands:**\n"
             f"• {list_command_display} - Lists persona commands and names in a multi-column Markdown table, plus reset instructions.\n"
-            f"• {reset_keywords_display} - Reset to default assistant behavior (LLM will confirm)."
+            f"• {reset_keywords_display} - Reset to default assistant behavior (LLM will confirm).\n"
+            f"• `{self.valves.keyword_prefix}download_personas` - Download and apply personas from repository (immediate)"
         )
+
         if not persona_list_items:
             main_list_str = "No personas configured."
         else:
             main_list_str = "\n".join(persona_list_items)
+
         return "Available Personas:\n" + main_list_str + command_info
